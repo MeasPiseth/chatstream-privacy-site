@@ -89,13 +89,20 @@ future_installment_amounts AS (
 installment_amounts_agg AS (
     SELECT
         schedule_id,
-        LISTAGG(
-            TO_CHAR(duedt, 'DD/MM/YYYY') ||
-            ' | PRINCIPAL=' || TO_CHAR(principal_amt, 'FM999999999999990.00') ||
-            ' | INTEREST=' || TO_CHAR(interest_amt, 'FM999999999999990.00') ||
-            ' | EMI=' || TO_CHAR(total_emi_amt, 'FM999999999999990.00'),
+        RTRIM(
+            XMLAGG(
+                XMLELEMENT(
+                    e,
+                    TO_CHAR(duedt, 'DD/MM/YYYY') ||
+                    ' | PRINCIPAL=' || TO_CHAR(principal_amt, 'FM999999999999990.00') ||
+                    ' | INTEREST=' || TO_CHAR(interest_amt, 'FM999999999999990.00') ||
+                    ' | EMI=' || TO_CHAR(total_emi_amt, 'FM999999999999990.00') ||
+                    ','
+                )
+                ORDER BY duedt
+            ).EXTRACT('//text()').GETCLOBVAL(),
             ','
-        ) WITHIN GROUP (ORDER BY duedt) AS installment_amounts_by_due_date
+        ) AS installment_amounts_by_due_date
     FROM future_installment_amounts
     WHERE principal_amt <> 0
        OR interest_amt <> 0
@@ -335,11 +342,18 @@ semibullet_agg AS (
     SELECT
         schedule_id,
         COUNT(*) AS total_semibullet_repay,
-        LISTAGG(
-            TO_CHAR(duedt, 'DD/MM/YYYY') || ' | ' ||
-            TO_CHAR(amt, 'FM999999999999990.00'),
+        RTRIM(
+            XMLAGG(
+                XMLELEMENT(
+                    e,
+                    TO_CHAR(duedt, 'DD/MM/YYYY') || ' | ' ||
+                    TO_CHAR(amt, 'FM999999999999990.00') ||
+                    ','
+                )
+                ORDER BY duedt
+            ).EXTRACT('//text()').GETCLOBVAL(),
             ','
-        ) WITHIN GROUP (ORDER BY duedt) AS semibullet_repay_by_months
+        ) AS semibullet_repay_by_months
     FROM compare_base
     GROUP BY schedule_id
 ),
