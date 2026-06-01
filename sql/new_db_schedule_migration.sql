@@ -454,7 +454,7 @@ semibullet_agg AS (
             ).EXTRACT('//text()').GETCLOBVAL(),
             ','
         ) AS semibullet_repay_by_months
-    FROM compare_base cb
+    FROM future_principal cb
     JOIN final_base_core fbc
       ON fbc.schedule_id = cb.schedule_id
      AND fbc.sched_type = 'SEMI-Bullet'
