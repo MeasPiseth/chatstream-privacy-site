@@ -325,15 +325,7 @@ amount_validation AS (
     GROUP BY c.schedule_id
 ),
 
-semibullet_agg AS (
-    SELECT
-        schedule_id,
-        COUNT(*) AS total_semibullet_repay
-    FROM compare_base
-    GROUP BY schedule_id
-),
-
-final_base AS (
+final_base_core AS (
     SELECT
         sa.acno,
         sa.schedule_id,
@@ -394,24 +386,6 @@ final_base AS (
                 END
         END AS sched_type,
         CASE
-            WHEN NVL(ps.remain_cnt, 0) >= 1
-             AND (
-                    mv.total_cmp_cnt <> mv.valid_month_cnt
-                 OR av.total_cmp_cnt <> av.valid_amount_cnt
-                 OR fc.first_amount_comparation <= 0
-                 )
-            THEN sb.total_semibullet_repay
-        END AS total_semibullet_repay,
-        CASE
-            WHEN NVL(ps.remain_cnt, 0) >= 1
-             AND (
-                    mv.total_cmp_cnt <> mv.valid_month_cnt
-                 OR av.total_cmp_cnt <> av.valid_amount_cnt
-                 OR fc.first_amount_comparation <= 0
-                 )
-            THEN TO_CLOB(NULL)
-        END AS semibullet_repay_by_months,
-        CASE
             WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
             THEN ist.intfstdt
             WHEN lp.lastpaid_date IS NOT NULL
@@ -461,8 +435,46 @@ final_base AS (
     LEFT JOIN lastpaiddate_analytic lp ON lp.schedule_id = sa.schedule_id
     LEFT JOIN future_interest fi ON fi.schedule_id = sa.schedule_id
     LEFT JOIN interest_start ist ON ist.schedule_id = sa.schedule_id
-    LEFT JOIN semibullet_agg sb ON sb.schedule_id = sa.schedule_id
     LEFT JOIN installment_amounts_agg ia ON ia.schedule_id = sa.schedule_id
+),
+
+semibullet_agg AS (
+    SELECT
+        cb.schedule_id,
+        COUNT(*) AS total_semibullet_repay,
+        RTRIM(
+            XMLAGG(
+                XMLELEMENT(
+                    e,
+                    TO_CHAR(cb.duedt, 'DD/MM/YYYY') || ' | ' ||
+                    TO_CHAR(cb.amt, 'FM999999999999990.00') ||
+                    ','
+                )
+                ORDER BY cb.duedt
+            ).EXTRACT('//text()').GETCLOBVAL(),
+            ','
+        ) AS semibullet_repay_by_months
+    FROM compare_base cb
+    JOIN final_base_core fbc
+      ON fbc.schedule_id = cb.schedule_id
+     AND fbc.sched_type = 'SEMI-Bullet'
+    GROUP BY cb.schedule_id
+),
+
+final_base AS (
+    SELECT
+        fbc.*,
+        CASE
+            WHEN fbc.sched_type = 'SEMI-Bullet'
+            THEN sb.total_semibullet_repay
+        END AS total_semibullet_repay,
+        CASE
+            WHEN fbc.sched_type = 'SEMI-Bullet'
+            THEN sb.semibullet_repay_by_months
+        END AS semibullet_repay_by_months
+    FROM final_base_core fbc
+    LEFT JOIN semibullet_agg sb
+      ON sb.schedule_id = fbc.schedule_id
 )
 
 SELECT
