@@ -89,20 +89,7 @@ future_installment_amounts AS (
 installment_amounts_agg AS (
     SELECT
         schedule_id,
-        RTRIM(
-            XMLAGG(
-                XMLELEMENT(
-                    e,
-                    TO_CHAR(duedt, 'DD/MM/YYYY') ||
-                    ' | PRINCIPAL=' || TO_CHAR(principal_amt, 'FM999999999999990.00') ||
-                    ' | INTEREST=' || TO_CHAR(interest_amt, 'FM999999999999990.00') ||
-                    ' | EMI=' || TO_CHAR(total_emi_amt, 'FM999999999999990.00') ||
-                    ','
-                )
-                ORDER BY duedt
-            ).EXTRACT('//text()').GETCLOBVAL(),
-            ','
-        ) AS installment_amounts_by_due_date
+        COUNT(*) AS installment_amount_cnt
     FROM future_installment_amounts
     WHERE principal_amt <> 0
        OR interest_amt <> 0
@@ -341,19 +328,7 @@ amount_validation AS (
 semibullet_agg AS (
     SELECT
         schedule_id,
-        COUNT(*) AS total_semibullet_repay,
-        RTRIM(
-            XMLAGG(
-                XMLELEMENT(
-                    e,
-                    TO_CHAR(duedt, 'DD/MM/YYYY') || ' | ' ||
-                    TO_CHAR(amt, 'FM999999999999990.00') ||
-                    ','
-                )
-                ORDER BY duedt
-            ).EXTRACT('//text()').GETCLOBVAL(),
-            ','
-        ) AS semibullet_repay_by_months
+        COUNT(*) AS total_semibullet_repay
     FROM compare_base
     GROUP BY schedule_id
 ),
@@ -382,7 +357,7 @@ final_base AS (
         fi.estimate_nextinterest_date,
         fi.estimate_nextinterest_amt,
         fi.estimate_nextemi_amt,
-        ia.installment_amounts_by_due_date,
+        ia.installment_amount_cnt,
         CASE
             WHEN sa.settlement_ccy = 'KHR'
             THEN ROUND(fc.first_amount_comparation, 0)
@@ -434,7 +409,7 @@ final_base AS (
                  OR av.total_cmp_cnt <> av.valid_amount_cnt
                  OR fc.first_amount_comparation <= 0
                  )
-            THEN sb.semibullet_repay_by_months
+            THEN TO_CLOB(NULL)
         END AS semibullet_repay_by_months,
         CASE
             WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
@@ -520,7 +495,7 @@ SELECT
     fb.regulardate_monthlyrepay,
     fb.total_semibullet_repay,
     fb.semibullet_repay_by_months,
-    fb.installment_amounts_by_due_date,
+    fb.installment_amount_cnt,
     CASE
         WHEN fb.schdlexpiry_date IS NOT NULL
          AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
@@ -554,3 +529,66 @@ SELECT
     END AS schedule_details_type
 FROM final_base fb
 ORDER BY fb.acno;
+
+/*
+Run this separate detail query when you need one row per installment.
+It avoids ORA-01489 by not concatenating many installments into one string.
+
+SELECT
+    ACCOUNT_NUMBER AS schedule_id,
+    ACCOUNT_NUMBER AS acno,
+    BRANCH_CODE,
+    TRUNC(SCHEDULE_DUE_DATE) AS duedt,
+    SUM(
+        CASE
+            WHEN UPPER(COMPONENT_NAME) = 'PRINCIPAL'
+            THEN NVL(AMOUNT_DUE, 0)
+            ELSE 0
+        END
+    ) AS principal_amt,
+    SUM(
+        CASE
+            WHEN UPPER(FORMULA_NAME) IN ('MAIN_INT_FRM_1', 'MAIN_INT_FRM_2')
+            THEN NVL(AMOUNT_DUE, 0)
+            ELSE 0
+        END
+    ) AS interest_amt,
+    MAX(
+        CASE
+            WHEN UPPER(FORMULA_NAME) = 'MAIN_INT_FRM_2'
+            THEN NVL(EMI_AMOUNT, 0)
+            ELSE 0
+        END
+    ) AS total_emi_amt,
+    MIN(SETTLEMENT_CCY) KEEP (DENSE_RANK FIRST ORDER BY SETTLEMENT_CCY) AS settlement_ccy
+FROM CLTB_ACCOUNT_SCHEDULES
+WHERE TRUNC(SCHEDULE_DUE_DATE) > TRUNC(PkgDate.migrateDate)
+GROUP BY
+    ACCOUNT_NUMBER,
+    BRANCH_CODE,
+    TRUNC(SCHEDULE_DUE_DATE)
+HAVING SUM(
+           CASE
+               WHEN UPPER(COMPONENT_NAME) = 'PRINCIPAL'
+               THEN NVL(AMOUNT_DUE, 0)
+               ELSE 0
+           END
+       ) <> 0
+    OR SUM(
+           CASE
+               WHEN UPPER(FORMULA_NAME) IN ('MAIN_INT_FRM_1', 'MAIN_INT_FRM_2')
+               THEN NVL(AMOUNT_DUE, 0)
+               ELSE 0
+           END
+       ) <> 0
+    OR MAX(
+           CASE
+               WHEN UPPER(FORMULA_NAME) = 'MAIN_INT_FRM_2'
+               THEN NVL(EMI_AMOUNT, 0)
+               ELSE 0
+           END
+       ) <> 0
+ORDER BY
+    schedule_id,
+    duedt;
+*/
