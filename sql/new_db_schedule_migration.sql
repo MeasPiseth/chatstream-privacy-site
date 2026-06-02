@@ -895,12 +895,55 @@ SELECT
 
     /* ===================================================== */
     /* ================= SCHEDULE PROPERTY ================= */
+    /* Branch order follows SCHEDULE DETAILS TYPE. */
+    /* Restructure branches are excluded: new DB script has no rstdt field. */
     /* ===================================================== */
     CASE
-        /* New DB script has no restructure indicator/date, so all supported cases use one schedule group. */
+        /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-          OR fb.sched_type IN ('EMI', 'EMP', 'SEMI-Bullet', 'PASSED_MATURITY')
+         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
         THEN '::SCHEDULE::'
+
+        /* ===== EMI-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt = 1
+        THEN '::SCHEDULE::'
+
+        /* ===== EMI-Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+        THEN '::SCHEDULE::'
+
+        /* ===== EMP-Grace Period ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN '::SCHEDULE::'
+
+        /* ===== EMP-Remain Schedules (<=2) ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt <= 2
+        THEN '::SCHEDULE::'
+
+        /* ===== EMP-Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+        THEN '::SCHEDULE::'
+
+        /* ===== SEMIBullet-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt = 1
+        THEN '::SCHEDULE::'
+
+        /* ===== SEMIBullet-Normal ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt >= 2
+        THEN '::SCHEDULE::'
+
+        WHEN fb.sched_type = 'PASSED_MATURITY'
+        THEN '::SCHEDULE::'
+
         ELSE 'Undefined property'
     END AS schedule_property,
 
