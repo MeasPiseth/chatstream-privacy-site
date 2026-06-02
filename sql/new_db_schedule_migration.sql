@@ -16,7 +16,8 @@ WITH schedule_base AS (
         SCHEDULE_FLAG,
         WAIVER_FLAG,
         CAPITALIZED
-    FROM CLTB_ACCOUNT_SCHEDULES
+	FROM CLTB_ACCOUNT_SCHEDULES
+	WHERE ACCOUNT_NUMBER IN (SELECT ACCOUNT_NUMBER FROM CLTB_ACCOUNT_MASTER WHERE ACCOUNT_STATUS='A' AND LOAN_TYPE='L' AND USER_DEFINED_STATUS NOT IN ('WOFF'))
 ),
 
 /* ===================================================== */
@@ -104,7 +105,7 @@ future_installment_amounts AS (
         interest_amt,
         total_emi_amt
     FROM installment_amounts
-    WHERE duedt > TRUNC(PkgDate.migrateDate)
+    WHERE duedt > TRUNC(SYSDATE)
 ),
 
 /* ===================================================== */
@@ -130,7 +131,7 @@ lastpaiddate_analytic AS (
         schedule_id,
         MAX(duedt) AS lastpaid_date
     FROM full_schedules
-    WHERE duedt <= TRUNC(PkgDate.migrateDate)
+    WHERE duedt <= TRUNC(SYSDATE)
       AND (
              component_name = 'PRINCIPAL'
           OR formula_name IN ('MAIN_INT_FRM_1', 'MAIN_INT_FRM_2')
@@ -179,7 +180,7 @@ future_principal AS (
         amt,
         settlement_ccy
     FROM principal_installments
-    WHERE duedt > TRUNC(PkgDate.migrateDate)
+    WHERE duedt > TRUNC(SYSDATE)
 ),
 
 /* ===================================================== */
@@ -236,7 +237,7 @@ future_interest AS (
         MIN(interest_amt) KEEP (DENSE_RANK FIRST ORDER BY duedt) AS estimate_nextinterest_amt,
         MIN(total_emi_amt) KEEP (DENSE_RANK FIRST ORDER BY duedt) AS estimate_nextemi_amt
     FROM interest_installments
-    WHERE duedt > TRUNC(PkgDate.migrateDate)
+    WHERE duedt > TRUNC(SYSDATE)
     GROUP BY schedule_id
 ),
 
@@ -248,7 +249,7 @@ interest_start AS (
         schedule_id,
         MIN(duedt) AS intfstdt
     FROM interest_installments
-    WHERE duedt > TRUNC(PkgDate.migrateDate)
+    WHERE duedt > TRUNC(SYSDATE)
     GROUP BY schedule_id
 ),
 
@@ -463,10 +464,11 @@ final_base_core AS (
                     ELSE 'SEMI-Bullet'
                 END
         END AS sched_type,
+
         /* === TO FIND OUT THE NEXT INTEREST REPAY DATE BASED ON LAST REPAYMENT HISTORY === */
         CASE
             /* ===== Interest schedule start date is still in the future ===== */
-            WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
+            WHEN TRUNC(ist.intfstdt) > TRUNC(SYSDATE)
             THEN ist.intfstdt
             /* ===== Use last-paid anchor + 1 month if it is still in the future ===== */
             WHEN lp.lastpaid_date IS NOT NULL
@@ -478,7 +480,7 @@ final_base_core AS (
                         'YYYYMMDD'
                     ),
                     1
-                 ) > TRUNC(PkgDate.migrateDate)
+                 ) > TRUNC(SYSDATE)
             THEN
                 ADD_MONTHS(
                     TO_DATE(
@@ -489,11 +491,11 @@ final_base_core AS (
                     1
                 )
             /* ===== Fallback: tomorrow ===== */
-            ELSE TRUNC(PkgDate.migrateDate) + 1
+            ELSE TRUNC(SYSDATE) + 1
         END AS interest_nextrepay_date,
         /* === NEXT INTEREST REPAY DATE SOURCE (EARMARK) === */
         CASE
-            WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
+            WHEN TRUNC(ist.intfstdt) > TRUNC(SYSDATE)
             THEN 'FROM_INT_START_DATE'
             WHEN lp.lastpaid_date IS NOT NULL
              AND ist.intfstdt IS NOT NULL
@@ -504,7 +506,7 @@ final_base_core AS (
                         'YYYYMMDD'
                     ),
                     1
-                 ) > TRUNC(PkgDate.migrateDate)
+                 ) > TRUNC(SYSDATE)
             THEN 'FROM_LASTPAID_PLUS_1M'
             ELSE 'FALLBACK_TOMORROW'
         END AS regulardate_monthlyrepay
@@ -558,7 +560,6 @@ semibullet_principal AS (
         t.duedt,
         t.principal_amt,
         t.principal_date,
-
         /* Sequence for 2:X, increment only when principal_amt > 0. */
         SUM(
             CASE
@@ -572,15 +573,43 @@ semibullet_principal AS (
         ) AS x_seq
     FROM (
         SELECT
-            fp.schedule_id,
-            fp.duedt,
+            sb.schedule_id,
+            sb.duedt,
             CASE
-                WHEN fp.settlement_ccy = 'KHR'
-                THEN ROUND(fp.amt, 0)
-                ELSE fp.amt
+                WHEN sb.rn_desc = 1 THEN
+                    CASE
+                        WHEN sb.settlement_ccy = 'KHR'
+                        THEN ROUND(sb.maturity_amt, 0)
+                        ELSE sb.maturity_amt
+                    END
+                ELSE
+                    CASE
+                        WHEN sb.settlement_ccy = 'KHR'
+                        THEN ROUND(sb.amt, 0)
+                        ELSE sb.amt
+                    END
             END AS principal_amt,
-            fp.duedt AS principal_date
-        FROM future_principal fp
+            CASE
+                WHEN sb.rn_desc = 1
+                THEN sb.maturity_date
+                ELSE sb.duedt
+            END AS principal_date
+        FROM (
+            SELECT
+                fp.schedule_id,
+                fp.duedt,
+                fp.amt,
+                fp.settlement_ccy,
+                ps.maturity_date,
+                ps.maturity_amt,
+                ROW_NUMBER() OVER (
+                    PARTITION BY fp.schedule_id
+                    ORDER BY fp.duedt DESC
+                ) AS rn_desc
+            FROM future_principal fp
+            JOIN principal_summary ps
+              ON ps.schedule_id = fp.schedule_id
+        ) sb
     ) t
 ),
 
@@ -590,10 +619,35 @@ semibullet_principal AS (
 /* ===================================================== */
 final_base AS (
     SELECT
-        fbc.*,
+        fbc.acno,
+        fbc.schedule_id,
+        fbc.branch_code,
+        fbc.settlement_ccy,
+        fbc.has_principal,
+        fbc.has_emp_interest,
+        fbc.has_emi,
+        fbc.remain_cnt,
+        fbc.pfstdt,
+        fbc.intfstdt,
+        fbc.first_date_comparation,
+        fbc.first_amount_comparation,
+        fbc.principle_nextrepay_date,
+        fbc.principle_nextrepay_amt,
+        fbc.maturity_date,
+        fbc.maturity_amt,
+        fbc.schdlexpiry_date,
+        fbc.schdlexpiry_amt,
+        fbc.lastpaid_date,
+        fbc.estimate_nextinterest_date,
+        fbc.estimate_nextinterest_amt,
+        fbc.estimate_nextemi_amt,
+        fbc.installment_amount_cnt,
+        fbc.round_firstamount_compare,
+        fbc.round_principleamt_nextrepay,
+        fbc.sched_type,
+        fbc.interest_nextrepay_date,
+        fbc.regulardate_monthlyrepay,
 
-        /* ===== PICK UP SEMI-BULLET VALUES ===== */
-        /* sched_type already contains the EMP vs SEMI-Bullet validation logic. */
         CASE
             WHEN fbc.sched_type = 'SEMI-Bullet'
             THEN sb.total_semibullet_repay
@@ -615,15 +669,18 @@ final_base AS (
 SELECT
     ROW_NUMBER() OVER (ORDER BY fb.acno) AS no,
     fb.acno,
+	fb.schedule_id,
     fb.branch_code,
     fb.settlement_ccy,
+	fb.has_principal,
+    fb.has_emp_interest,
+    fb.has_emi,
     fb.sched_type,
+	fb.first_date_comparation,
+    fb.round_firstamount_compare,
     fb.remain_cnt AS numremain_schedules,
-    fb.schedule_id,
     fb.pfstdt AS principle_start_date,
     fb.intfstdt AS interest_start_date,
-    fb.first_date_comparation,
-    fb.round_firstamount_compare,
     fb.maturity_date,
     fb.maturity_amt,
     fb.schdlexpiry_date,   -- Actual maturity_date based on PRINCIPAL schedule loop
@@ -646,7 +703,7 @@ SELECT
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+         AND fb.schdlexpiry_date <= TRUNC(SYSDATE)
         THEN 'EMI/EMP/SEMI-Past Maturity Date'
 
         /* ===== EMI-Remain Schedules (=1) ===== */
@@ -654,11 +711,11 @@ SELECT
          AND fb.remain_cnt = 1
         THEN 'EMI-Remain Schedules(=1)'
 
-        /* ===== EMI-Grace Period ===== */
+		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN 'EMI-Grace Period'
 
         /* ===== EMI-Normal ===== */
@@ -670,10 +727,10 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN 'EMP-Grace Period'
 
-        /* ===== EMP-Remain Schedules (<=2) ===== */
+		/* ===== EMP-Remain Schedules (<=2) ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN 'EMP-Remain Schedules(<=2)'
@@ -705,7 +762,7 @@ SELECT
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+         AND fb.schdlexpiry_date <= TRUNC(SYSDATE)
         THEN TO_CLOB(
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!PROPERTY:1:2' ||
             '!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1'
@@ -719,11 +776,11 @@ SELECT
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
         )
 
-        /* ===== EMI-Grace Period ===== */
+		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN TO_CLOB(
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!PROPERTY:2:2!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
@@ -741,7 +798,7 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN TO_CLOB(
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
@@ -804,10 +861,10 @@ SELECT
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+         AND fb.schdlexpiry_date <= TRUNC(SYSDATE)
         THEN TO_CLOB(
-            '::CONSTANT!!DUE!!M01' || TO_CHAR(TRUNC(PkgDate.migrateDate) + 1, 'DD') ||
-            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(TRUNC(PkgDate.migrateDate) + 1, 'YYYYMMDD') || '!!!!'
+            '::CONSTANT!!DUE!!M01' || TO_CHAR(TRUNC(SYSDATE) + 1, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(TRUNC(SYSDATE) + 1, 'YYYYMMDD') || '!!!!'
         )
 
         /* ===== EMI-Remain Schedules (=1) ===== */
@@ -820,11 +877,11 @@ SELECT
             '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!'
         )
 
-        /* ===== EMI-Grace Period ===== */
+		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN TO_CLOB(
             /* ===== Group 1: INTEREST during grace period ===== */
             '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
@@ -848,7 +905,7 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN TO_CLOB(
             '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
             '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
@@ -934,7 +991,7 @@ SELECT
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+         AND fb.schdlexpiry_date <= TRUNC(SYSDATE)
         THEN '::SCHEDULE::'
 
         /* ===== EMI-Remain Schedules (=1) ===== */
@@ -942,12 +999,12 @@ SELECT
          AND fb.remain_cnt = 1
         THEN '::SCHEDULE::'
 
-        /* ===== EMI-Grace Period ===== */
+		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
-        THEN '::SCHEDULE::'
+         AND fb.pfstdt > TRUNC(SYSDATE)
+        THEN '::SCHEDULE::SCHEDULE::'
 
         /* ===== EMI-Normal ===== */
         WHEN fb.sched_type = 'EMI'
@@ -958,7 +1015,7 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
-         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+         AND fb.pfstdt > TRUNC(SYSDATE)
         THEN '::SCHEDULE::'
 
         /* ===== EMP-Remain Schedules (<=2) ===== */
@@ -998,72 +1055,10 @@ SELECT
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
-         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
-        THEN TO_CHAR(TRUNC(PkgDate.migrateDate) + 5, 'YYYYMMDD')
+         AND fb.schdlexpiry_date <= TRUNC(SYSDATE)
+        THEN TO_CHAR(TRUNC(SYSDATE) + 2, 'YYYYMMDD')
         ELSE TO_CHAR(fb.schdlexpiry_date, 'YYYYMM') || TO_CHAR(fb.interest_nextrepay_date, 'DD')
     END AS finalschedule_maturity
 
 FROM final_base fb
 ORDER BY fb.acno;
-/*
-Run this separate detail query when you need one row per installment.
-It avoids ORA-01489 by not concatenating many installments into one string.
-
-SELECT
-    ACCOUNT_NUMBER AS schedule_id,
-    ACCOUNT_NUMBER AS acno,
-    BRANCH_CODE,
-    TRUNC(SCHEDULE_DUE_DATE) AS duedt,
-    SUM(
-        CASE
-            WHEN UPPER(COMPONENT_NAME) = 'PRINCIPAL'
-            THEN NVL(AMOUNT_DUE, 0)
-            ELSE 0
-        END
-    ) AS principal_amt,
-    SUM(
-        CASE
-            WHEN UPPER(FORMULA_NAME) IN ('MAIN_INT_FRM_1', 'MAIN_INT_FRM_2')
-            THEN NVL(AMOUNT_DUE, 0)
-            ELSE 0
-        END
-    ) AS interest_amt,
-    MAX(
-        CASE
-            WHEN UPPER(FORMULA_NAME) = 'MAIN_INT_FRM_2'
-            THEN NVL(EMI_AMOUNT, 0)
-            ELSE 0
-        END
-    ) AS total_emi_amt,
-    MIN(SETTLEMENT_CCY) KEEP (DENSE_RANK FIRST ORDER BY SETTLEMENT_CCY) AS settlement_ccy
-FROM CLTB_ACCOUNT_SCHEDULES
-WHERE TRUNC(SCHEDULE_DUE_DATE) > TRUNC(PkgDate.migrateDate)
-GROUP BY
-    ACCOUNT_NUMBER,
-    BRANCH_CODE,
-    TRUNC(SCHEDULE_DUE_DATE)
-HAVING SUM(
-           CASE
-               WHEN UPPER(COMPONENT_NAME) = 'PRINCIPAL'
-               THEN NVL(AMOUNT_DUE, 0)
-               ELSE 0
-           END
-       ) <> 0
-    OR SUM(
-           CASE
-               WHEN UPPER(FORMULA_NAME) IN ('MAIN_INT_FRM_1', 'MAIN_INT_FRM_2')
-               THEN NVL(AMOUNT_DUE, 0)
-               ELSE 0
-           END
-       ) <> 0
-    OR MAX(
-           CASE
-               WHEN UPPER(FORMULA_NAME) = 'MAIN_INT_FRM_2'
-               THEN NVL(EMI_AMOUNT, 0)
-               ELSE 0
-           END
-       ) <> 0
-ORDER BY
-    schedule_id,
-    duedt;
-*/
