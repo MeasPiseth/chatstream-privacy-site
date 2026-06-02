@@ -254,6 +254,20 @@ interest_start AS (
 ),
 
 /* ===================================================== */
+/* EMI INTEREST START DATE */
+/* MAIN_INT_FRM_2 only: used for upfront-principal EMI check */
+/* ===================================================== */
+emi_interest_start AS (
+    SELECT
+        schedule_id,
+        MIN(duedt) AS emi_intfstdt
+    FROM full_schedules
+    WHERE duedt > TRUNC(SYSDATE)
+      AND formula_name = 'MAIN_INT_FRM_2'
+    GROUP BY schedule_id
+),
+
+/* ===================================================== */
 /* COMPARE PIPELINE: EMP VS SEMI-BULLET */
 /* Exclude maturity row for regularity comparison */
 /* ===================================================== */
@@ -404,6 +418,7 @@ final_base_core AS (
         NVL(ps.remain_cnt, 0) AS remain_cnt,
         ps.principle_nextrepay_date AS pfstdt,
         ist.intfstdt,
+        eist.emi_intfstdt,
         fc.first_date_comparation,
         fc.first_amount_comparation,
         ps.principle_nextrepay_date,
@@ -520,6 +535,7 @@ final_base_core AS (
     LEFT JOIN lastpaiddate_analytic lp ON lp.schedule_id = sa.schedule_id
     LEFT JOIN future_interest fi ON fi.schedule_id = sa.schedule_id
     LEFT JOIN interest_start ist ON ist.schedule_id = sa.schedule_id
+    LEFT JOIN emi_interest_start eist ON eist.schedule_id = sa.schedule_id
     LEFT JOIN installment_amounts_agg ia ON ia.schedule_id = sa.schedule_id
 ),
 
@@ -629,6 +645,7 @@ final_base AS (
         fbc.remain_cnt,
         fbc.pfstdt,
         fbc.intfstdt,
+        fbc.emi_intfstdt,
         fbc.first_date_comparation,
         fbc.first_amount_comparation,
         fbc.principle_nextrepay_date,
@@ -681,6 +698,7 @@ SELECT
     fb.remain_cnt AS numremain_schedules,
     fb.pfstdt AS principle_start_date,
     fb.intfstdt AS interest_start_date,
+    fb.emi_intfstdt AS emi_interest_start_date,
     fb.maturity_date,
     fb.maturity_amt,
     fb.schdlexpiry_date,   -- Actual maturity_date based on PRINCIPAL schedule loop
@@ -711,6 +729,13 @@ SELECT
          AND fb.remain_cnt = 1
         THEN 'EMI-Remain Schedules(=1)'
 
+        /* ===== EMI-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.emi_intfstdt > TRUNC(SYSDATE)
+         AND fb.pfstdt < fb.emi_intfstdt
+        THEN 'EMI-Upfront Principal then Normal'
+
 		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
@@ -734,6 +759,12 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN 'EMP-Remain Schedules(<=2)'
+
+        /* ===== EMP-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.round_principleamt_nextrepay <> fb.round_firstamount_compare
+        THEN 'EMP-Upfront Principal then Normal'
 
         /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
@@ -776,6 +807,32 @@ SELECT
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
         )
 
+        /* ===== EMI-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.emi_intfstdt > TRUNC(SYSDATE)
+         AND fb.pfstdt < fb.emi_intfstdt
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!PROPERTY:1:2!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1'
+        )
+
+        /* ===== EMI-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.emi_intfstdt > TRUNC(SYSDATE)
+         AND fb.pfstdt < fb.emi_intfstdt
+        THEN TO_CLOB(
+            /* ===== Group 1: UPFRONT PRINCIPAL ===== */
+            '::LINEAR!!DUE!!M01' || TO_CHAR(fb.pfstdt, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.pfstdt, 'YYYYMMDD') || '!!!!' ||
+            TO_CHAR(fb.round_principleamt_nextrepay) ||
+
+            /* ===== Group 2: CONSTANT EMI after upfront principal ===== */
+            '::CONSTANT!!DUE!!M01' || TO_CHAR(fb.emi_intfstdt, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.emi_intfstdt, 'YYYYMMDD') || '!!!!'
+        )
+
 		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
@@ -808,6 +865,16 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== EMP-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.round_principleamt_nextrepay <> fb.round_firstamount_compare
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
         )
@@ -877,6 +944,22 @@ SELECT
             '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!'
         )
 
+        /* ===== EMI-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.emi_intfstdt > TRUNC(SYSDATE)
+         AND fb.pfstdt < fb.emi_intfstdt
+        THEN TO_CLOB(
+            /* ===== Group 1: UPFRONT PRINCIPAL ===== */
+            '::LINEAR!!DUE!!M01' || TO_CHAR(fb.pfstdt, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.pfstdt, 'YYYYMMDD') || '!!!!' ||
+            TO_CHAR(fb.round_principleamt_nextrepay) ||
+
+            /* ===== Group 2: CONSTANT EMI after upfront principal ===== */
+            '::CONSTANT!!DUE!!M01' || TO_CHAR(fb.emi_intfstdt, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.emi_intfstdt, 'YYYYMMDD') || '!!!!'
+        )
+
 		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
@@ -923,6 +1006,24 @@ SELECT
             '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
             '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.principle_nextrepay_date, 'YYYYMM') ||
             TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!' || '!!' || TO_CHAR(fb.round_principleamt_nextrepay)
+        )
+
+        /* ===== EMP-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.round_principleamt_nextrepay <> fb.round_firstamount_compare
+        THEN TO_CLOB(
+            /* ===== Group 1: UPFRONT PRINCIPAL ===== */
+            '::LINEAR!!DUE!!M01' || TO_CHAR(fb.pfstdt, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.pfstdt, 'YYYYMMDD') || '!!!!' ||
+            TO_CHAR(fb.round_principleamt_nextrepay) ||
+
+            /* ===== Group 2: EMP normal after upfront principal ===== */
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            TO_CHAR(fb.round_firstamount_compare)
         )
 
         /* ===== EMP-Normal ===== */
@@ -999,6 +1100,13 @@ SELECT
          AND fb.remain_cnt = 1
         THEN '::SCHEDULE::'
 
+        /* ===== EMI-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.emi_intfstdt > TRUNC(SYSDATE)
+         AND fb.pfstdt < fb.emi_intfstdt
+        THEN '::SCHEDULE::SCHEDULE::'
+
 		/* ===== EMI-Grace Period ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
@@ -1022,6 +1130,12 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN '::SCHEDULE::'
+
+        /* ===== EMP-Upfront Principal then Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.round_principleamt_nextrepay <> fb.round_firstamount_compare
+        THEN '::SCHEDULE::SCHEDULE::'
 
         /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
