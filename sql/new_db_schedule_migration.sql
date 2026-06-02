@@ -1,3 +1,6 @@
+/* ===================================================== */
+/* ACTIVE ACCOUNT SCHEDULE SOURCE */
+/* ===================================================== */
 WITH schedule_base AS (
     SELECT
         ACCOUNT_NUMBER           AS schedule_id,
@@ -16,6 +19,9 @@ WITH schedule_base AS (
     FROM CLTB_ACCOUNT_SCHEDULES
 ),
 
+/* ===================================================== */
+/* FULL SCHEDULE */
+/* ===================================================== */
 full_schedules AS (
     SELECT
         acno,
@@ -34,6 +40,9 @@ full_schedules AS (
     FROM schedule_base
 ),
 
+/* ===================================================== */
+/* SCHEDULE ACCOUNT LIST */
+/* ===================================================== */
 schedule_accounts AS (
     SELECT
         schedule_id,
@@ -44,6 +53,9 @@ schedule_accounts AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* SCHEDULE SIGNATURE: PRINCIPAL / EMP INTEREST / EMI */
+/* ===================================================== */
 schedule_signature AS (
     SELECT
         schedule_id,
@@ -54,6 +66,12 @@ schedule_signature AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* INSTALLMENT AMOUNTS BY DUE DATE */
+/* Principal = PRINCIPAL.AMOUNT_DUE */
+/* Interest  = MAIN_INT_FRM_1/2.AMOUNT_DUE */
+/* EMI total = MAIN_INT_FRM_2.EMI_AMOUNT */
+/* ===================================================== */
 installment_amounts AS (
     SELECT
         fs.schedule_id,
@@ -75,6 +93,9 @@ installment_amounts AS (
         fs.duedt
 ),
 
+/* ===================================================== */
+/* FUTURE INSTALLMENT AMOUNTS */
+/* ===================================================== */
 future_installment_amounts AS (
     SELECT
         schedule_id,
@@ -86,6 +107,10 @@ future_installment_amounts AS (
     WHERE duedt > TRUNC(PkgDate.migrateDate)
 ),
 
+/* ===================================================== */
+/* FUTURE INSTALLMENT COUNT */
+/* Avoid long concatenation in main query */
+/* ===================================================== */
 installment_amounts_agg AS (
     SELECT
         schedule_id,
@@ -97,6 +122,9 @@ installment_amounts_agg AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* LAST PAID / LAST DUE DATE UP TO MIGRATION DATE */
+/* ===================================================== */
 lastpaiddate_analytic AS (
     SELECT
         schedule_id,
@@ -110,6 +138,9 @@ lastpaiddate_analytic AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* PRINCIPAL STREAM */
+/* ===================================================== */
 principal_installments AS (
     SELECT
         schedule_id,
@@ -125,6 +156,9 @@ principal_installments AS (
         duedt
 ),
 
+/* ===================================================== */
+/* SCHEDULE EXPIRY BASED ON PRINCIPAL STREAM */
+/* ===================================================== */
 schdlexpirydate_analytic AS (
     SELECT
         schedule_id,
@@ -134,6 +168,9 @@ schdlexpirydate_analytic AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* FUTURE PRINCIPAL INSTALLMENTS */
+/* ===================================================== */
 future_principal AS (
     SELECT
         acno,
@@ -145,6 +182,9 @@ future_principal AS (
     WHERE duedt > TRUNC(PkgDate.migrateDate)
 ),
 
+/* ===================================================== */
+/* PRINCIPAL SUMMARY / REMAINING SCHEDULES */
+/* ===================================================== */
 principal_summary AS (
     SELECT
         schedule_id,
@@ -159,6 +199,11 @@ principal_summary AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* INTEREST STREAM */
+/* EMP/SEMI-Bullet: MAIN_INT_FRM_1 */
+/* EMI: MAIN_INT_FRM_2 and special-case MAIN_INT_FRM_1 */
+/* ===================================================== */
 interest_installments AS (
     SELECT
         fs.schedule_id,
@@ -181,6 +226,9 @@ interest_installments AS (
         fs.duedt
 ),
 
+/* ===================================================== */
+/* FUTURE INTEREST / EMI ESTIMATE */
+/* ===================================================== */
 future_interest AS (
     SELECT
         schedule_id,
@@ -192,6 +240,9 @@ future_interest AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* INTEREST START DATE */
+/* ===================================================== */
 interest_start AS (
     SELECT
         schedule_id,
@@ -201,6 +252,10 @@ interest_start AS (
     GROUP BY schedule_id
 ),
 
+/* ===================================================== */
+/* COMPARE PIPELINE: EMP VS SEMI-BULLET */
+/* Exclude maturity row for regularity comparison */
+/* ===================================================== */
 compare_base AS (
     SELECT
         fp.acno,
@@ -218,6 +273,7 @@ compare_base AS (
     WHERE fp.duedt < ps.maturity_date
 ),
 
+/* ===== PICK LAST PRINCIPAL ROWS FOR COMPARISON ===== */
 compare_rn AS (
     SELECT
         acno,
@@ -236,6 +292,7 @@ compare_rn AS (
     FROM compare_base
 ),
 
+/* ===== LIMIT COMPARISON WINDOW TO LAST FIVE ROWS ===== */
 compare_for_first AS (
     SELECT
         acno,
@@ -252,6 +309,7 @@ compare_for_first AS (
     WHERE rn_desc <= 5
 ),
 
+/* ===== REORDER COMPARISON WINDOW ASCENDING ===== */
 compare_limited AS (
     SELECT
         acno,
@@ -271,6 +329,7 @@ compare_limited AS (
     FROM compare_for_first
 ),
 
+/* ===== USE UP TO FOUR ROWS FOR MONTH/AMOUNT VALIDATION ===== */
 compare_limited_filtered AS (
     SELECT
         acno,
@@ -288,6 +347,7 @@ compare_limited_filtered AS (
     WHERE cmp_rn_limited <= LEAST(4, remain_cnt)
 ),
 
+/* ===== FIRST COMPARISON DATE AND AMOUNT ===== */
 first_compare AS (
     SELECT
         schedule_id,
@@ -297,6 +357,7 @@ first_compare AS (
     GROUP BY schedule_id
 ),
 
+/* ===== VALIDATE MONTHLY PRINCIPAL FREQUENCY ===== */
 month_validation AS (
     SELECT
         c.schedule_id,
@@ -314,6 +375,7 @@ month_validation AS (
     GROUP BY c.schedule_id
 ),
 
+/* ===== VALIDATE FIXED PRINCIPAL AMOUNT ===== */
 amount_validation AS (
     SELECT
         c.schedule_id,
@@ -325,6 +387,10 @@ amount_validation AS (
     GROUP BY c.schedule_id
 ),
 
+/* ===================================================== */
+/* FINAL BASE CORE */
+/* Derive schedule type before SEMI-Bullet aggregation */
+/* ===================================================== */
 final_base_core AS (
     SELECT
         sa.acno,
@@ -360,13 +426,22 @@ final_base_core AS (
             THEN ROUND(ps.principle_nextrepay_amt, 0)
             ELSE ps.principle_nextrepay_amt
         END AS round_principleamt_nextrepay,
+        /* ================= SCHEDULE TYPE ================= */
         CASE
+            /* ===== PASSED MATURITY ===== */
             WHEN NVL(ps.remain_cnt, 0) = 0
             THEN 'PASSED_MATURITY'
+
+            /* ================= EMI_BASE ================= */
+            /* New DB: MAIN_INT_FRM_2 exists */
             WHEN NVL(ss.has_emi, 0) = 1
             THEN 'EMI'
+
+            /* ================= EMP_BASE / SEMI-BULLET BASE ================= */
+            /* New DB: PRINCIPAL + MAIN_INT_FRM_1 without MAIN_INT_FRM_2 */
             ELSE
                 CASE
+                    /* ===== SPECIAL CASE: REMAIN = 2 ===== */
                     WHEN NVL(ps.remain_cnt, 0) = 2 THEN
                         CASE
                             WHEN TRUNC(se.schdlexpiry_date, 'MM') <>
@@ -378,16 +453,22 @@ final_base_core AS (
                             THEN 'SEMI-Bullet'
                             ELSE 'EMP'
                         END
+                    /* ===== NORMAL CASE: REMAIN >= 3 ===== */
                     WHEN mv.total_cmp_cnt = mv.valid_month_cnt
                      AND av.total_cmp_cnt = av.valid_amount_cnt
                      AND fc.first_amount_comparation > 0
                     THEN 'EMP'
+
+                    /* ===== FLEXIBLE PRINCIPAL DATE/AMOUNT ===== */
                     ELSE 'SEMI-Bullet'
                 END
         END AS sched_type,
+        /* === TO FIND OUT THE NEXT INTEREST REPAY DATE BASED ON LAST REPAYMENT HISTORY === */
         CASE
+            /* ===== Interest schedule start date is still in the future ===== */
             WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
             THEN ist.intfstdt
+            /* ===== Use last-paid anchor + 1 month if it is still in the future ===== */
             WHEN lp.lastpaid_date IS NOT NULL
              AND ist.intfstdt IS NOT NULL
              AND ADD_MONTHS(
@@ -407,8 +488,10 @@ final_base_core AS (
                     ),
                     1
                 )
+            /* ===== Fallback: tomorrow ===== */
             ELSE TRUNC(PkgDate.migrateDate) + 1
         END AS interest_nextrepay_date,
+        /* === NEXT INTEREST REPAY DATE SOURCE (EARMARK) === */
         CASE
             WHEN TRUNC(ist.intfstdt) > TRUNC(PkgDate.migrateDate)
             THEN 'FROM_INT_START_DATE'
@@ -438,6 +521,10 @@ final_base_core AS (
     LEFT JOIN installment_amounts_agg ia ON ia.schedule_id = sa.schedule_id
 ),
 
+/* ===================================================== */
+/* SEMI-BULLET VALUES */
+/* Populate only for derived sched_type = SEMI-Bullet */
+/* ===================================================== */
 semibullet_agg AS (
     SELECT
         cb.schedule_id,
@@ -461,6 +548,10 @@ semibullet_agg AS (
     GROUP BY cb.schedule_id
 ),
 
+/* ===================================================== */
+/* FINAL BASE */
+/* Attach SEMI-Bullet values after sched_type is known */
+/* ===================================================== */
 final_base AS (
     SELECT
         fbc.*,
@@ -477,6 +568,9 @@ final_base AS (
       ON sb.schedule_id = fbc.schedule_id
 )
 
+/* ===================================================== */
+/* FINAL SELECT */
+/* ===================================================== */
 SELECT
     ROW_NUMBER() OVER (ORDER BY fb.acno) AS no,
     fb.acno,
@@ -508,19 +602,29 @@ SELECT
     fb.total_semibullet_repay,
     fb.semibullet_repay_by_months,
     fb.installment_amount_cnt,
+
+    /* ===================================================== */
+    /* ================= SCHEDULE DETAILS TYPE ============= */
+    /* ===================================================== */
     CASE
+        /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
         WHEN fb.schdlexpiry_date IS NOT NULL
          AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
         THEN 'EMI/EMP/SEMI-Past Maturity Date'
+        /* ===== EMI-Remain Schedules (=1) ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt = 1
         THEN 'EMI-Remain Schedules(=1)'
+        /* ===== EMI-Normal ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
         THEN 'EMI-Normal'
+        /* ===== EMP-Remain Schedules (<=2) ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN 'EMP-Remain Schedules(<=2)'
+        /* ===== EMP-Grace Period ===== */
+        /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
@@ -529,9 +633,11 @@ SELECT
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
         THEN 'EMP-Normal'
+        /* ===== SEMIBullet-Remain Schedules (=1) ===== */
         WHEN fb.sched_type = 'SEMI-Bullet'
          AND fb.remain_cnt = 1
         THEN 'SEMIBullet-Remain Schedules(=1)'
+        /* ===== SEMIBullet-Normal ===== */
         WHEN fb.sched_type = 'SEMI-Bullet'
          AND fb.remain_cnt >= 2
         THEN 'SEMIBullet-Normal'
