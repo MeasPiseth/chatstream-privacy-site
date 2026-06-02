@@ -781,6 +781,8 @@ SELECT
 
     /* ===================================================== */
     /* ================= INSTALLMENT VALUES ================ */
+    /* Branch order follows SCHEDULE DETAILS TYPE. */
+    /* Restructure branches are excluded: new DB script has no rstdt/partial fields. */
     /* ===================================================== */
     CASE
         /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
