@@ -659,17 +659,17 @@ SELECT
          AND fb.remain_cnt >= 2
         THEN 'EMI-Normal'
 
-        /* ===== EMP-Remain Schedules (<=2) ===== */
-        WHEN fb.sched_type = 'EMP'
-         AND fb.remain_cnt <= 2
-        THEN 'EMP-Remain Schedules(<=2)'
-
         /* ===== EMP-Grace Period ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
          AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
         THEN 'EMP-Grace Period'
+
+        /* ===== EMP-Remain Schedules (<=2) ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt <= 2
+        THEN 'EMP-Remain Schedules(<=2)'
 
         /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
@@ -720,8 +720,27 @@ SELECT
             '!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1'
         )
 
-        /* ===== EMP-Grace Period / EMP-Remain / EMP-Normal ===== */
+        /* ===== EMP-Grace Period ===== */
         WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== EMP-Remain Schedules (<=2) ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt <= 2
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== EMP-Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
         THEN TO_CLOB(
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
