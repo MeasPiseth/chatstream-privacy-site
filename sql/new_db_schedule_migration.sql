@@ -591,10 +591,14 @@ semibullet_principal AS (
 final_base AS (
     SELECT
         fbc.*,
+
+        /* ===== PICK UP SEMI-BULLET VALUES ===== */
+        /* sched_type already contains the EMP vs SEMI-Bullet validation logic. */
         CASE
             WHEN fbc.sched_type = 'SEMI-Bullet'
             THEN sb.total_semibullet_repay
         END AS total_semibullet_repay,
+
         CASE
             WHEN fbc.sched_type = 'SEMI-Bullet'
             THEN sb.semibullet_repay_by_months
