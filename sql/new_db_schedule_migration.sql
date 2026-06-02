@@ -654,6 +654,13 @@ SELECT
          AND fb.remain_cnt = 1
         THEN 'EMI-Remain Schedules(=1)'
 
+        /* ===== EMI-Grace Period ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN 'EMI-Grace Period'
+
         /* ===== EMI-Normal ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
@@ -710,6 +717,16 @@ SELECT
         THEN TO_CLOB(
             '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
             '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== EMI-Grace Period ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!PROPERTY:2:2!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
         )
 
         /* ===== EMI-Normal ===== */
@@ -801,6 +818,22 @@ SELECT
             '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
             '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
             '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!'
+        )
+
+        /* ===== EMI-Grace Period ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            /* ===== Group 1: INTEREST during grace period ===== */
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+
+            /* ===== Group 2: CONSTANT EMI after grace period ===== */
+            '!!CONSTANT!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.pfstdt, 'YYYYMM') ||
+            TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!!!'
         )
 
         /* ===== EMI-Normal ===== */
@@ -907,6 +940,13 @@ SELECT
         /* ===== EMI-Remain Schedules (=1) ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt = 1
+        THEN '::SCHEDULE::'
+
+        /* ===== EMI-Grace Period ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
         THEN '::SCHEDULE::'
 
         /* ===== EMI-Normal ===== */
