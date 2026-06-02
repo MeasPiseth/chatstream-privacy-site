@@ -549,6 +549,42 @@ semibullet_agg AS (
 ),
 
 /* ===================================================== */
+/* SEMI-BULLET PRINCIPAL SEQUENCE */
+/* Build dynamic 2:X schedule fields for final output */
+/* ===================================================== */
+semibullet_principal AS (
+    SELECT
+        t.schedule_id,
+        t.duedt,
+        t.principal_amt,
+        t.principal_date,
+
+        /* Sequence for 2:X, increment only when principal_amt > 0. */
+        SUM(
+            CASE
+                WHEN t.principal_amt > 0 THEN 1
+                ELSE 0
+            END
+        ) OVER (
+            PARTITION BY t.schedule_id
+            ORDER BY t.duedt
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS x_seq
+    FROM (
+        SELECT
+            fp.schedule_id,
+            fp.duedt,
+            CASE
+                WHEN fp.settlement_ccy = 'KHR'
+                THEN ROUND(fp.amt, 0)
+                ELSE fp.amt
+            END AS principal_amt,
+            fp.duedt AS principal_date
+        FROM future_principal fp
+    ) t
+),
+
+/* ===================================================== */
 /* FINAL BASE */
 /* Attach SEMI-Bullet values after sched_type is known */
 /* ===================================================== */
@@ -570,35 +606,32 @@ final_base AS (
 
 /* ===================================================== */
 /* FINAL SELECT */
+/* Critical output aligned to the previous DB script */
 /* ===================================================== */
 SELECT
     ROW_NUMBER() OVER (ORDER BY fb.acno) AS no,
     fb.acno,
-    fb.schedule_id,
     fb.branch_code,
     fb.settlement_ccy,
-    fb.has_principal,
-    fb.has_emp_interest,
-    fb.has_emi,
     fb.sched_type,
-    fb.remain_cnt,
-    fb.pfstdt,
-    fb.intfstdt,
-    fb.principle_nextrepay_date,
-    fb.round_principleamt_nextrepay,
+    fb.remain_cnt AS numremain_schedules,
+    fb.schedule_id,
+    fb.pfstdt AS principle_start_date,
+    fb.intfstdt AS interest_start_date,
+    fb.first_date_comparation,
+    fb.round_firstamount_compare,
     fb.maturity_date,
     fb.maturity_amt,
-    fb.schdlexpiry_date,
+    fb.schdlexpiry_date,   -- Actual maturity_date based on PRINCIPAL schedule loop
     fb.schdlexpiry_amt,
     fb.lastpaid_date,
+    fb.principle_nextrepay_date,
+    fb.round_principleamt_nextrepay,
+    fb.interest_nextrepay_date,
+    fb.regulardate_monthlyrepay,
     fb.estimate_nextinterest_date,
     fb.estimate_nextinterest_amt,
     fb.estimate_nextemi_amt,
-    fb.first_date_comparation,
-    fb.first_amount_comparation,
-    fb.round_firstamount_compare,
-    fb.interest_nextrepay_date,
-    fb.regulardate_monthlyrepay,
     fb.total_semibullet_repay,
     fb.semibullet_repay_by_months,
     fb.installment_amount_cnt,
@@ -611,43 +644,259 @@ SELECT
         WHEN fb.schdlexpiry_date IS NOT NULL
          AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
         THEN 'EMI/EMP/SEMI-Past Maturity Date'
+
         /* ===== EMI-Remain Schedules (=1) ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt = 1
         THEN 'EMI-Remain Schedules(=1)'
+
         /* ===== EMI-Normal ===== */
         WHEN fb.sched_type = 'EMI'
          AND fb.remain_cnt >= 2
         THEN 'EMI-Normal'
+
         /* ===== EMP-Remain Schedules (<=2) ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt <= 2
         THEN 'EMP-Remain Schedules(<=2)'
+
         /* ===== EMP-Grace Period ===== */
-        /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
          AND fb.pfstdt > fb.intfstdt
          AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
         THEN 'EMP-Grace Period'
+
+        /* ===== EMP-Normal ===== */
         WHEN fb.sched_type = 'EMP'
          AND fb.remain_cnt > 2
         THEN 'EMP-Normal'
+
         /* ===== SEMIBullet-Remain Schedules (=1) ===== */
         WHEN fb.sched_type = 'SEMI-Bullet'
          AND fb.remain_cnt = 1
         THEN 'SEMIBullet-Remain Schedules(=1)'
+
         /* ===== SEMIBullet-Normal ===== */
         WHEN fb.sched_type = 'SEMI-Bullet'
          AND fb.remain_cnt >= 2
         THEN 'SEMIBullet-Normal'
+
         WHEN fb.sched_type = 'PASSED_MATURITY'
         THEN 'EMI/EMP/SEMI-Past Maturity Date'
+
         ELSE 'Undefined schedule'
-    END AS schedule_details_type
+    END AS schedule_details_type,
+
+    /* ===================================================== */
+    /* ================= SCHEDULE HEADER FORMAT ============ */
+    /* ===================================================== */
+    CASE
+        /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
+        WHEN fb.schdlexpiry_date IS NOT NULL
+         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!PROPERTY:1:2' ||
+            '!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1'
+        )
+
+        /* ===== EMI-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt = 1
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== EMI-Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!PROPERTY:1:2' ||
+            '!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1'
+        )
+
+        /* ===== EMP-Grace Period / EMP-Remain / EMP-Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== SEMIBullet-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt = 1
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1!!START.DATE:2:1!!END.DATE:2:1!!ACTUAL.AMT:2:1'
+        )
+
+        /* ===== SEMIBullet-Normal ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt >= 2
+        THEN TO_CLOB(
+            '::PAYMENT.TYPE:1:1!!PAYMENT.METHOD:1:1!!PAYMENT.FREQ:1:1!!PROPERTY:1:1!!BILL.TYPE:1:1!!START.DATE:1:1!!END.DATE:1:1!!ACTUAL.AMT:1:1' ||
+            '!!PAYMENT.TYPE:2:1!!PAYMENT.METHOD:2:1!!PAYMENT.FREQ:2:1!!PROPERTY:2:1!!BILL.TYPE:2:1'
+        ) ||
+        (
+            SELECT XMLAGG(
+                       XMLELEMENT(
+                           e,
+                           '!!START.DATE:2:' || sp.x_seq ||
+                           '!!END.DATE:2:' || sp.x_seq ||
+                           '!!ACTUAL.AMT:2:' || sp.x_seq
+                       )
+                       ORDER BY sp.duedt
+                   ).EXTRACT('//text()').GETCLOBVAL()
+            FROM semibullet_principal sp
+            WHERE sp.schedule_id = fb.schedule_id
+              AND sp.principal_amt > 0
+        )
+
+        ELSE TO_CLOB('Cannot defined this header_schedule')
+    END AS schedule_header_format,
+
+    /* ===================================================== */
+    /* ================= INSTALLMENT VALUES ================ */
+    /* ===================================================== */
+    CASE
+        /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
+        WHEN fb.schdlexpiry_date IS NOT NULL
+         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            '::CONSTANT!!DUE!!M01' || TO_CHAR(TRUNC(PkgDate.migrateDate) + 1, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(TRUNC(PkgDate.migrateDate) + 1, 'YYYYMMDD') || '!!!!'
+        )
+
+        /* ===== EMI-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt = 1
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!'
+        )
+
+        /* ===== EMI-Normal ===== */
+        WHEN fb.sched_type = 'EMI'
+         AND fb.remain_cnt >= 2
+        THEN TO_CLOB(
+            '::CONSTANT!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!!!'
+        )
+
+        /* ===== EMP-Grace Period ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+         AND fb.pfstdt > fb.intfstdt
+         AND fb.pfstdt > TRUNC(PkgDate.migrateDate)
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.principle_nextrepay_date, 'YYYYMM') ||
+            TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!' || '!!' || TO_CHAR(fb.round_firstamount_compare)
+        )
+
+        /* ===== EMP-Remain Schedules (<=2) ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt <= 2
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.principle_nextrepay_date, 'YYYYMM') ||
+            TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!' || '!!' || TO_CHAR(fb.round_principleamt_nextrepay)
+        )
+
+        /* ===== EMP-Normal ===== */
+        WHEN fb.sched_type = 'EMP'
+         AND fb.remain_cnt > 2
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            TO_CHAR(fb.round_firstamount_compare)
+        )
+
+        /* ===== SEMIBullet-Remain Schedules (=1) ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt = 1
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT!!' || TO_CHAR(fb.principle_nextrepay_date, 'YYYYMM') ||
+            TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!' || '!!'
+        )
+
+        /* ===== SEMIBullet-Normal ===== */
+        WHEN fb.sched_type = 'SEMI-Bullet'
+         AND fb.remain_cnt >= 2
+        THEN TO_CLOB(
+            '::INTEREST!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!PRINCIPALINT!!PAYMENT!!' || TO_CHAR(fb.interest_nextrepay_date, 'YYYYMMDD') || '!!' || '!!' ||
+            '!!LINEAR!!DUE!!M01' || TO_CHAR(fb.interest_nextrepay_date, 'DD') ||
+            '!!ACCOUNT!!PAYMENT'
+        ) ||
+        (
+            SELECT XMLAGG(
+                       XMLELEMENT(
+                           e,
+                           '!!' ||
+                           TO_CHAR(sp.principal_date, 'YYYYMM') || TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!' ||
+                           CASE
+                               WHEN TRUNC(sp.principal_date) = TRUNC(fb.schdlexpiry_date)
+                               THEN '!!'
+                               ELSE TO_CHAR(sp.principal_date, 'YYYYMM') || TO_CHAR(fb.interest_nextrepay_date, 'DD') || '!!'
+                           END ||
+                           CASE
+                               WHEN TRUNC(sp.principal_date) = TRUNC(fb.schdlexpiry_date)
+                               THEN ''
+                               ELSE TO_CHAR(sp.principal_amt)
+                           END
+                       )
+                       ORDER BY sp.duedt
+                   ).EXTRACT('//text()').GETCLOBVAL()
+            FROM semibullet_principal sp
+            WHERE sp.schedule_id = fb.schedule_id
+              AND sp.principal_amt > 0
+        )
+
+        ELSE TO_CLOB('Cannot defined this values_schedule')
+    END AS schedule_installment_values,
+
+    /* ===================================================== */
+    /* ================= SCHEDULE PROPERTY ================= */
+    /* ===================================================== */
+    CASE
+        /* New DB script has no restructure indicator/date, so all supported cases use one schedule group. */
+        WHEN fb.schdlexpiry_date IS NOT NULL
+          OR fb.sched_type IN ('EMI', 'EMP', 'SEMI-Bullet', 'PASSED_MATURITY')
+        THEN '::SCHEDULE::'
+        ELSE 'Undefined property'
+    END AS schedule_property,
+
+    /* ===================================================== */
+    /* ============== SCHEDULE NEXT TAB VALUE DATE ========= */
+    /* ===================================================== */
+    CAST(NULL AS VARCHAR2(20)) AS schedule_nexttab_valuedate,
+
+    /* ===================================================== */
+    /* ================= SCHEDULE EXPIRED DATE ============= */
+    /* ===================================================== */
+    CASE
+        /* ===== EMI/EMP/SEMI --- Past Maturity Date ===== */
+        WHEN fb.schdlexpiry_date IS NOT NULL
+         AND fb.schdlexpiry_date <= TRUNC(PkgDate.migrateDate)
+        THEN TO_CHAR(TRUNC(PkgDate.migrateDate) + 5, 'YYYYMMDD')
+        ELSE TO_CHAR(fb.schdlexpiry_date, 'YYYYMM') || TO_CHAR(fb.interest_nextrepay_date, 'DD')
+    END AS finalschedule_maturity
+
 FROM final_base fb
 ORDER BY fb.acno;
-
 /*
 Run this separate detail query when you need one row per installment.
 It avoids ORA-01489 by not concatenating many installments into one string.
