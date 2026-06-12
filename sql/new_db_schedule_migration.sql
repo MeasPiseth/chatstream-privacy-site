@@ -11,6 +11,7 @@ WITH schedule_base AS (
         TRUNC(SCHEDULE_DUE_DATE) AS duedt,
         NVL(AMOUNT_DUE, 0)       AS amt,
         NVL(AMOUNT_SETTLED, 0)   AS settled_amt,
+        NVL(ACCRUED_AMOUNT, 0)   AS accrued_amount,
         SETTLEMENT_CCY,
         NVL(EMI_AMOUNT, 0)       AS emi_amount,
         SCHEDULE_FLAG,
@@ -33,6 +34,7 @@ full_schedules AS (
         duedt,
         amt,
         settled_amt,
+        accrued_amount,
         SETTLEMENT_CCY,
         emi_amount,
         SCHEDULE_FLAG,
@@ -64,6 +66,98 @@ schedule_signature AS (
         MAX(CASE WHEN formula_name = 'MAIN_INT_FRM_1' THEN 1 ELSE 0 END) AS has_emp_interest,
         MAX(CASE WHEN formula_name = 'MAIN_INT_FRM_2' THEN 1 ELSE 0 END) AS has_emi
     FROM full_schedules
+    GROUP BY schedule_id
+),
+
+/* ===================================================== */
+/* LATEST EFFECTIVE INTEREST RATE */
+/* ===================================================== */
+latest_intrate AS (
+    SELECT
+        account_number AS schedule_id,
+        ude_value AS interest_rate
+    FROM (
+        SELECT
+            account_number,
+            ude_value,
+            ROW_NUMBER() OVER (
+                PARTITION BY account_number
+                ORDER BY effective_date DESC
+            ) AS rn
+        FROM CLTB_ACCOUNT_UDE_VALUES
+        WHERE ude_id = 'INTEREST_RATE'
+          AND effective_date <= TRUNC(SYSDATE)
+    )
+    WHERE rn = 1
+),
+
+/* ===================================================== */
+/* PRINCIPAL OUTSTANDING EXCLUDING PAST-DUE PRINCIPAL */
+/* ===================================================== */
+loan_outstanding AS (
+    SELECT
+        fs.schedule_id,
+        am.maturity_date,
+        CASE
+            WHEN am.maturity_date <= TRUNC(SYSDATE)
+            THEN 0
+            ELSE
+                am.amount_disbursed
+                - SUM(
+                    CASE
+                        WHEN fs.component_name = 'PRINCIPAL'
+                        THEN fs.settled_amt
+                        ELSE 0
+                    END
+                  )
+                - SUM(
+                    CASE
+                        WHEN fs.component_name = 'PRINCIPAL'
+                         AND fs.duedt <= TRUNC(SYSDATE)
+                        THEN fs.amt - fs.settled_amt
+                        ELSE 0
+                    END
+                  )
+        END AS pri_os_exc_pd_principal
+    FROM full_schedules fs
+    JOIN CLTB_ACCOUNT_MASTER am
+      ON am.account_number = fs.schedule_id
+    GROUP BY
+        fs.schedule_id,
+        am.amount_disbursed,
+        am.maturity_date
+),
+
+/* ===================================================== */
+/* LAST FULLY ACCRUED INTEREST DUE DATE */
+/* ===================================================== */
+last_full_accrual AS (
+    SELECT
+        schedule_id,
+        MAX(duedt) AS last_fully_accrued_interest_due_date
+    FROM full_schedules
+    WHERE component_name = 'MAIN_INT'
+      AND duedt <= TRUNC(SYSDATE)
+      AND NVL(accrued_amount, 0) >= NVL(amt, 0)
+      AND NVL(amt, 0) > 0
+    GROUP BY schedule_id
+),
+
+/* ===================================================== */
+/* ACCRUED INTEREST IN CURRENT PERIOD */
+/* Future MAIN_INT row where interest is partially accrued */
+/* ===================================================== */
+accrued_interest_in_period AS (
+    SELECT
+        schedule_id,
+        MIN(duedt) AS accrued_interest_due_date,
+        MIN(accrued_amount) KEEP (DENSE_RANK FIRST ORDER BY duedt) AS accrued_interest_amount,
+        MIN(amt) KEEP (DENSE_RANK FIRST ORDER BY duedt) AS accrued_interest_amount_due
+    FROM full_schedules
+    WHERE duedt > TRUNC(SYSDATE)
+      AND component_name = 'MAIN_INT'
+      AND NVL(accrued_amount, 0) > 0
+      AND NVL(accrued_amount, 0) < NVL(amt, 0)
     GROUP BY schedule_id
 ),
 
@@ -431,6 +525,25 @@ final_base_core AS (
         fi.estimate_nextinterest_date,
         fi.estimate_nextinterest_amt,
         fi.estimate_nextemi_amt,
+        aiip.accrued_interest_due_date,
+        aiip.accrued_interest_amount,
+        aiip.accrued_interest_amount_due,
+        lfa.last_fully_accrued_interest_due_date,
+        lo.pri_os_exc_pd_principal,
+        lir.interest_rate,
+        ROUND(
+            CASE
+                WHEN lfa.last_fully_accrued_interest_due_date IS NULL
+                  OR lo.pri_os_exc_pd_principal IS NULL
+                  OR lir.interest_rate IS NULL
+                THEN 0
+                ELSE
+                    lo.pri_os_exc_pd_principal
+                    * (lir.interest_rate / 360)
+                    * (TRUNC(SYSDATE) - lfa.last_fully_accrued_interest_due_date)
+            END,
+            2
+        ) AS manual_cal_accrued_interest,
         ia.installment_amount_cnt,
         CASE
             WHEN sa.settlement_ccy = 'KHR'
@@ -536,6 +649,10 @@ final_base_core AS (
     LEFT JOIN future_interest fi ON fi.schedule_id = sa.schedule_id
     LEFT JOIN interest_start ist ON ist.schedule_id = sa.schedule_id
     LEFT JOIN emi_interest_start eist ON eist.schedule_id = sa.schedule_id
+    LEFT JOIN accrued_interest_in_period aiip ON aiip.schedule_id = sa.schedule_id
+    LEFT JOIN last_full_accrual lfa ON lfa.schedule_id = sa.schedule_id
+    LEFT JOIN loan_outstanding lo ON lo.schedule_id = sa.schedule_id
+    LEFT JOIN latest_intrate lir ON lir.schedule_id = sa.schedule_id
     LEFT JOIN installment_amounts_agg ia ON ia.schedule_id = sa.schedule_id
 ),
 
@@ -658,6 +775,13 @@ final_base AS (
         fbc.estimate_nextinterest_date,
         fbc.estimate_nextinterest_amt,
         fbc.estimate_nextemi_amt,
+        fbc.accrued_interest_due_date,
+        fbc.accrued_interest_amount,
+        fbc.accrued_interest_amount_due,
+        fbc.last_fully_accrued_interest_due_date,
+        fbc.pri_os_exc_pd_principal,
+        fbc.interest_rate,
+        fbc.manual_cal_accrued_interest,
         fbc.installment_amount_cnt,
         fbc.round_firstamount_compare,
         fbc.round_principleamt_nextrepay,
@@ -693,6 +817,13 @@ SELECT
     fb.has_emp_interest,
     fb.has_emi,
     fb.sched_type,
+    fb.pri_os_exc_pd_principal,
+    fb.interest_rate,
+    fb.accrued_interest_due_date,
+    fb.accrued_interest_amount,
+    fb.accrued_interest_amount_due,
+    fb.last_fully_accrued_interest_due_date,
+    fb.manual_cal_accrued_interest,
 	fb.first_date_comparation,
     fb.round_firstamount_compare,
     fb.remain_cnt AS numremain_schedules,
